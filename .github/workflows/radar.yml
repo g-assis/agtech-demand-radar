@@ -1,0 +1,45 @@
+name: AgTech Demand Radar
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '20 7 * * 1'
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: agtech-radar
+  cancel-in-progress: false
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Coletar dados publicos
+        id: collect
+        continue-on-error: true
+        run: python radar.py
+      - name: Preparar painel
+        if: always()
+        run: |
+          mkdir -p site/data
+          cp output/* site/data/ 2>/dev/null || true
+          test -f site/data/status.json || echo '{"erro":"Coleta indisponivel","total_registros":0,"fontes":[]}' > site/data/status.json
+      - name: Arquivar resultados e diagnosticos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agtech-radar-report
+          path: output/
+          retention-days: 30
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+      - uses: actions/deploy-pages@v4
