@@ -73,6 +73,7 @@ def finep():
    workbook=pd.ExcelFile(io.BytesIO(raw))
    inspected=0;matched=0
    for sheet in workbook.sheet_names:
+    if norm(sheet).startswith(("guia","legenda","crd_-_condicoes")):continue
     df=pd.read_excel(workbook,sheet_name=sheet,dtype=str)
     inspected+=len(df)
     parsed=extract(df,"Finep",url+"#sheet="+sheet)
