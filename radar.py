@@ -101,8 +101,8 @@ def clean_org(s):
 
 def find_date(text):
  # Conservative: only dates explicitly labeled in published records.
- patterns=[r"(?:data(?:\\s+de)?\\s+(?:contratacao|aprovacao|liberacao|desembolso|assinatura))[:\\s-]{0,8}(\\d{1,2}/\\d{1,2}/\\d{4})",
-           r"(?:data(?:\\s+de)?\\s+(?:contratacao|aprovacao|liberacao|desembolso|assinatura))[:\\s-]{0,8}(\\d{4}-\\d{2}-\\d{2})"]
+ patterns=[r"(?:data(?:\s+de)?\s+(?:contratacao|aprovacao|liberacao|desembolso|assinatura))[:\s-]{0,8}(\d{1,2}/\d{1,2}/\d{4})",
+           r"(?:data(?:\s+de)?\s+(?:contratacao|aprovacao|liberacao|desembolso|assinatura))[:\s-]{0,8}(\d{4}-\d{2}-\d{2})"]
  from datetime import datetime as dt
  for pattern in patterns:
   m=re.search(pattern,norm(text))
