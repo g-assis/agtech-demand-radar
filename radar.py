@@ -37,7 +37,7 @@ def extract(df,source,url):
  for _,x in df.iterrows():
   d={norm(k):str(v) for k,v in x.items() if pd.notna(v)}
   desc=" | ".join(f"{k}: {v}" for k,v in d.items() if any(t in k for t in ("projeto","setor","atividade","produto","finalidade","objetivo","tema","descricao")))
-  date_info=" | ".join(f"{k}: {v}" for k,v in d.items() if "data" in k and any(q in k for q in ("contrat","aprov","liber","desemb","assin")))
+  date_info=" | ".join(f"{k}: {v}" for k,v in d.items() if (("data" in k or k.startswith("dt ") or k.startswith("dt_")) and not any(z in k for z in ("atualizacao","extracao"))) )
   if date_info: desc=(desc+" | "+date_info).strip(" |")
   org=next((v for k,v in d.items() if any(t in k for t in ("cliente","empresa","beneficiario","proponente"))),"")
   val=next((v for k,v in d.items() if "valor" in k),"")
@@ -124,16 +124,13 @@ def normalize_records(raw):
  for item in raw:
   if item["tipo_evidencia"]=="operacao_nao_aprovada":continue
   date=find_date(item["descricao"])
-  if not date:
-   missing_dates+=1
-   # Undated records are NOT silently treated as recent.
-   continue
-  if date<cutoff:
+  if not date: missing_dates+=1
+  elif date<cutoff:
    excluded_old+=1;continue
   org=clean_org(item["organizacao"])
   # Same evidence type and textual record in separate exports is one signal.
   key=hashlib.sha256(("|".join([item["fonte"],item["tipo_evidencia"],org,norm(item["descricao"])[:400]])).encode()).hexdigest()[:16]
-  item.update(data_evidencia=date,id_evidencia=key,problema_economico="; ".join(problem(item["descricao"])),evidencia_comercial="investimento_financiado" if item["tipo_evidencia"] in ("operacao_contratada","financiamento") else "desembolso_reportado",confianca_data="extraida_do_texto")
+  item.update(data_evidencia=date,periodo="ultimos_36_meses" if date else "data_nao_verificada",id_evidencia=key,problema_economico="; ".join(problem(item["descricao"])),evidencia_comercial="investimento_financiado" if item["tipo_evidencia"] in ("operacao_contratada","financiamento") else "desembolso_reportado",confianca_data="extraida_do_texto")
   collected[key]=item
  return list(collected.values()),dict(excluidos_antigos=excluded_old,sem_data_verificavel=missing_dates,janela_meses=LOOKBACK_MONTHS)
 
@@ -144,11 +141,12 @@ def main():
    data=fn();raw+=data;status.append(dict(fonte=name,estado="ok" if data else "sem_registros",registros=len(data)))
   except Exception as e:status.append(dict(fonte=name,estado="erro",registros=0,motivo=str(e)[:500]))
  allrows,quality=normalize_records(raw)
- cols=["id_evidencia","fonte","tipo_evidencia","organizacao","titulo","descricao","valor_reportado","temas","data_evidencia","problema_economico","evidencia_comercial","confianca_data","url_fonte","demanda_comercial_comprovada"]
+ cols=["id_evidencia","fonte","tipo_evidencia","organizacao","titulo","descricao","valor_reportado","temas","data_evidencia","periodo","problema_economico","evidencia_comercial","confianca_data","url_fonte","demanda_comercial_comprovada"]
  with (OUT/"evidencias.csv").open("w",newline="",encoding="utf-8-sig") as f:
   w=csv.DictWriter(f,cols);w.writeheader();w.writerows(allrows)
  groups={}
  for a in allrows:
+  if a["periodo"]!="ultimos_36_meses":continue
   for tag in a["problema_economico"].split("; "):
    g=groups.setdefault(tag,dict(tema=tag,n_registros=0,fontes=set(),organizacoes=set(),contratacoes=0,desembolsos=0))
    g["n_registros"]+=1;g["fontes"].add(a["fonte"])
@@ -161,8 +159,8 @@ def main():
   w=csv.DictWriter(f,["tema","n_registros","fontes","n_organizacoes","contratacoes","desembolsos"]);w.writeheader();w.writerows(summary)
  (OUT/"evidencias.json").write_text(json.dumps(allrows,ensure_ascii=False),encoding="utf-8")
  (OUT/"temas.json").write_text(json.dumps(summary,ensure_ascii=False),encoding="utf-8")
- state=dict(gerado_em_utc=datetime.now(timezone.utc).isoformat(),total_registros=len(allrows),registros_brutos=len(raw),fontes=status,qualidade=quality,nota="Somente registros com data identificada nos campos textuais; investimento nao prova demanda. Sem ranking comercial ate verificacao de contratos.")
+ state=dict(gerado_em_utc=datetime.now(timezone.utc).isoformat(),total_registros=len(allrows),registros_recentes=sum(x["periodo"]=="ultimos_36_meses" for x in allrows),registros_brutos=len(raw),fontes=status,qualidade=quality,nota="Somente registros com data identificada nos campos textuais; investimento nao prova demanda. Sem ranking comercial ate verificacao de contratos.")
  (OUT/"status.json").write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding="utf-8")
  print(json.dumps(state,ensure_ascii=False,indent=2))
- if not allrows:raise SystemExit("Nenhum registro com data verificavel na janela; revisar colunas de data e status.json")
+ if not allrows:raise SystemExit("Sem evidencias coletadas; revisar fontes")
 if __name__=="__main__":main()
