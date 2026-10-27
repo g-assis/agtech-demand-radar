@@ -1,4 +1,5 @@
-import csv,json,re,io,unicodedata
+import csv,json,re,io,unicodedata,hashlib
+from datetime import timedelta
 from pathlib import Path
 from datetime import datetime,timezone
 import requests,pandas as pd
@@ -7,6 +8,7 @@ from urllib.parse import urljoin
 
 OUT=Path("output");OUT.mkdir(exist_ok=True)
 S=requests.Session();S.headers.update({"User-Agent":"AgTechDemandRadar/0.3 (+public research)"})
+LOOKBACK_MONTHS=36
 KEYS=["agro","agric","cooperativ","grao","silo","armazen","sement","alimento","frigor","latic","irrig","pecuar","safra","fertiliz","colheita","cafe","sucro","processamento","residuo"]
 TOPICS={"armazenagem":["silo","armazen","secagem"],"processamento":["processamento","beneficiamento","agroindustr"],"qualidade":["qualidade","inspec","rastreab"],"energia_agua":["energia","irrig","agua"],"residuos":["residuo","reaproveitamento","subproduto"],"automacao":["automat","sensor","iot","digital","inteligencia artificial"]}
 def norm(v):
@@ -35,6 +37,8 @@ def extract(df,source,url):
  for _,x in df.iterrows():
   d={norm(k):str(v) for k,v in x.items() if pd.notna(v)}
   desc=" | ".join(f"{k}: {v}" for k,v in d.items() if any(t in k for t in ("projeto","setor","atividade","produto","finalidade","objetivo","tema","descricao")))
+  date_info=" | ".join(f"{k}: {v}" for k,v in d.items() if "data" in k and any(q in k for q in ("contrat","aprov","liber","desemb","assin")))
+  if date_info: desc=(desc+" | "+date_info).strip(" |")
   org=next((v for k,v in d.items() if any(t in k for t in ("cliente","empresa","beneficiario","proponente"))),"")
   val=next((v for k,v in d.items() if "valor" in k),"")
   if not desc: desc=" | ".join(f"{k}: {v}" for k,v in d.items() if len(v)>3)[:1200]
@@ -59,7 +63,6 @@ def finep():
  datasets=[
   ("Contratacao.xlsx","operacao_contratada"),
   ("Liberacao.xlsx","desembolso"),
-  ("Nao_Aprovados.xlsx","operacao_nao_aprovada"),
  ]
  results=[];errors=[]
  for filename,kind in datasets:
@@ -90,30 +93,75 @@ def embrapii():
   seen.add(href);hit=row("Embrapii",href,title,title,kind="projeto_pesquisa")
   if hit:result.append(hit)
  return result
+def clean_org(s):
+ x=norm(s)
+ x=re.sub(r"\\b(s/?a|ltda|eireli|sa|me|epp)\\b"," ",x)
+ return re.sub(r"[^a-z0-9]","",x)[:100]
+
+def find_date(text):
+ # Conservative: only dates explicitly labeled in published records.
+ patterns=[r"(?:data(?:\\s+de)?\\s+(?:contratacao|aprovacao|liberacao|desembolso|assinatura))[:\\s-]{0,8}(\\d{1,2}/\\d{1,2}/\\d{4})",
+           r"(?:data(?:\\s+de)?\\s+(?:contratacao|aprovacao|liberacao|desembolso|assinatura))[:\\s-]{0,8}(\\d{4}-\\d{2}-\\d{2})"]
+ from datetime import datetime as dt
+ for pattern in patterns:
+  m=re.search(pattern,norm(text))
+  if m:
+   try:return dt.strptime(m.group(1),"%d/%m/%Y" if "/" in m.group(1) else "%Y-%m-%d").date().isoformat()
+   except ValueError:pass
+ return ""
+
+def problem(text):
+ t=norm(text)
+ matched=[k for k,words in TOPICS.items() if any(w in t for w in words)]
+ return matched or ["nao_identificado"]
+
+def normalize_records(raw):
+ # Exclude rejected financing; disbursement is a separate financial event.
+ cutoff=(datetime.now(timezone.utc)-timedelta(days=LOOKBACK_MONTHS*30.44)).date().isoformat()
+ collected={}
+ excluded_old=0; missing_dates=0
+ for item in raw:
+  if item["tipo_evidencia"]=="operacao_nao_aprovada":continue
+  date=find_date(item["descricao"])
+  if not date:
+   missing_dates+=1
+   # Undated records are NOT silently treated as recent.
+   continue
+  if date<cutoff:
+   excluded_old+=1;continue
+  org=clean_org(item["organizacao"])
+  # Same evidence type and textual record in separate exports is one signal.
+  key=hashlib.sha256(("|".join([item["fonte"],item["tipo_evidencia"],org,norm(item["descricao"])[:400]])).encode()).hexdigest()[:16]
+  item.update(data_evidencia=date,id_evidencia=key,problema_economico="; ".join(problem(item["descricao"])),evidencia_comercial="investimento_financiado" if item["tipo_evidencia"] in ("operacao_contratada","financiamento") else "desembolso_reportado",confianca_data="extraida_do_texto")
+  collected[key]=item
+ return list(collected.values()),dict(excluidos_antigos=excluded_old,sem_data_verificavel=missing_dates,janela_meses=LOOKBACK_MONTHS)
+
 def main():
- allrows=[];status=[]
- for name,fn in [("BNDES",bndes),("Finep",finep),("Embrapii",embrapii)]:
+ raw=[];status=[]
+ for name,fn in [("BNDES",bndes),("Finep",finep)]:
   try:
-   data=fn();allrows+=data;status.append(dict(fonte=name,estado="ok" if data else "sem_registros",registros=len(data)))
+   data=fn();raw+=data;status.append(dict(fonte=name,estado="ok" if data else "sem_registros",registros=len(data)))
   except Exception as e:status.append(dict(fonte=name,estado="erro",registros=0,motivo=str(e)[:500]))
- allrows=list({(a["fonte"],a["url_fonte"],a["titulo"],a["organizacao"]):a for a in allrows}.values())
- cols=["fonte","tipo_evidencia","organizacao","titulo","descricao","valor_reportado","temas","url_fonte","demanda_comercial_comprovada"]
+ allrows,quality=normalize_records(raw)
+ cols=["id_evidencia","fonte","tipo_evidencia","organizacao","titulo","descricao","valor_reportado","temas","data_evidencia","problema_economico","evidencia_comercial","confianca_data","url_fonte","demanda_comercial_comprovada"]
  with (OUT/"evidencias.csv").open("w",newline="",encoding="utf-8-sig") as f:
   w=csv.DictWriter(f,cols);w.writeheader();w.writerows(allrows)
  groups={}
  for a in allrows:
-  for tag in a["temas"].split("; "):
-   g=groups.setdefault(tag,dict(tema=tag,n_registros=0,fontes=set(),organizacoes=set()))
+  for tag in a["problema_economico"].split("; "):
+   g=groups.setdefault(tag,dict(tema=tag,n_registros=0,fontes=set(),organizacoes=set(),contratacoes=0,desembolsos=0))
    g["n_registros"]+=1;g["fontes"].add(a["fonte"])
-   if a["organizacao"]:g["organizacoes"].add(a["organizacao"])
- summary=[dict(tema=v["tema"],n_registros=v["n_registros"],fontes=", ".join(sorted(v["fontes"])),n_organizacoes=len(v["organizacoes"])) for v in groups.values()]
+   if a["organizacao"]:g["organizacoes"].add(clean_org(a["organizacao"]))
+   if a["tipo_evidencia"]=="desembolso":g["desembolsos"]+=1
+   else:g["contratacoes"]+=1
+ summary=[dict(tema=v["tema"],n_registros=v["n_registros"],fontes=", ".join(sorted(v["fontes"])),n_organizacoes=len(v["organizacoes"]),contratacoes=v["contratacoes"],desembolsos=v["desembolsos"]) for v in groups.values()]
  summary.sort(key=lambda x:-x["n_registros"])
  with (OUT/"temas.csv").open("w",newline="",encoding="utf-8") as f:
-  w=csv.DictWriter(f,["tema","n_registros","fontes","n_organizacoes"]);w.writeheader();w.writerows(summary)
+  w=csv.DictWriter(f,["tema","n_registros","fontes","n_organizacoes","contratacoes","desembolsos"]);w.writeheader();w.writerows(summary)
  (OUT/"evidencias.json").write_text(json.dumps(allrows,ensure_ascii=False),encoding="utf-8")
  (OUT/"temas.json").write_text(json.dumps(summary,ensure_ascii=False),encoding="utf-8")
- state=dict(gerado_em_utc=datetime.now(timezone.utc).isoformat(),total_registros=len(allrows),fontes=status,nota="Financiamentos e projetos sao sinais de investimento, NAO demanda comercial comprovada.")
+ state=dict(gerado_em_utc=datetime.now(timezone.utc).isoformat(),total_registros=len(allrows),registros_brutos=len(raw),fontes=status,qualidade=quality,nota="Somente registros com data identificada nos campos textuais; investimento nao prova demanda. Sem ranking comercial ate verificacao de contratos.")
  (OUT/"status.json").write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding="utf-8")
  print(json.dumps(state,ensure_ascii=False,indent=2))
- if not allrows:raise SystemExit("Nenhuma evidencia coletada; verifique status.json")
+ if not allrows:raise SystemExit("Nenhum registro com data verificavel na janela; revisar colunas de data e status.json")
 if __name__=="__main__":main()
