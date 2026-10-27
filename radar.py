@@ -32,19 +32,59 @@ def row(source,url,title,detail,org="",value="",kind="financiamento"):
  if not any(k in full for k in KEYS):return None
  tags=[k for k,v in TOPICS.items() if any(w in full for w in v)]
  return dict(fonte=source,tipo_evidencia=kind,organizacao=org,titulo=title[:240],descricao=detail[:1200],valor_reportado=str(value),temas="; ".join(tags) or "nao_classificado",url_fonte=url,demanda_comercial_comprovada="NAO")
-def extract(df,source,url):
- result=[]
+def date_column_score(key, kind):
+ k=norm(key).replace("_"," ").replace("-"," ")
+ if any(x in k for x in ("nascimento","atualizacao","extracao","vencimento","publicacao","inicio vigencia","fim vigencia")):return 0
+ event_words=("contrat","assinatura","aprov","formaliza") if kind!="desembolso" else ("libera","desembol","pagamento")
+ if any(x in k for x in event_words):return 4 if any(x in k for x in ("data","dt ","date","ano")) else 2
+ if re.search(r"\\b(data|date|dt)\\b",k):return 1
+ return 0
+
+def parse_date(value):
+ if pd.isna(value):return ""
+ if isinstance(value,(datetime,pd.Timestamp)):return value.date().isoformat()
+ raw=str(value).strip()
+ if not raw or raw.lower() in ("nan","nat","none"):return ""
+ # ISO, Brazilian date strings, and Excel serial numbers.
+ if re.fullmatch(r"\\d{5}(?:\\.0)?",raw):
+  try:
+   d=pd.to_datetime(float(raw),unit="D",origin="1899-12-30")
+   if 1990<=d.year<=datetime.now(timezone.utc).year+1:return d.date().isoformat()
+  except (ValueError,OverflowError,TypeError):pass
+ try:
+  parsed=pd.to_datetime(raw,dayfirst=True,errors="coerce")
+  if pd.notna(parsed) and 1990<=parsed.year<=datetime.now(timezone.utc).year+1:return parsed.date().isoformat()
+ except (ValueError,OverflowError,TypeError):pass
+ return ""
+
+def extract(df,source,url,kind="financiamento"):
+ result=[];picked={}
+ columns=[str(c) for c in df.columns]
+ ranked=sorted(columns,key=lambda c:date_column_score(c,kind),reverse=True)
+ eligible=[c for c in ranked if date_column_score(c,kind)>0]
+ for col in eligible[:8]:
+  series=df[col].dropna().head(80)
+  valid=sum(bool(parse_date(v)) for v in series)
+  if valid:picked[col]=valid
+ print(json.dumps({"fonte":source,"arquivo":url.split("#")[0].split("/")[-1],"aba":url.split("#sheet=")[-1] if "#sheet=" in url else "CSV","colunas":columns[:65],"datas_candidatas":picked},ensure_ascii=False))
  for _,x in df.iterrows():
   d={norm(k):str(v) for k,v in x.items() if pd.notna(v)}
   desc=" | ".join(f"{k}: {v}" for k,v in d.items() if any(t in k for t in ("projeto","setor","atividade","produto","finalidade","objetivo","tema","descricao")))
-  date_info=" | ".join(f"{k}: {v}" for k,v in d.items() if (("data" in k or k.startswith("dt ") or k.startswith("dt_")) and not any(z in k for z in ("atualizacao","extracao"))) )
-  if date_info: desc=(desc+" | "+date_info).strip(" |")
   org=next((v for k,v in d.items() if any(t in k for t in ("cliente","empresa","beneficiario","proponente"))),"")
   val=next((v for k,v in d.items() if "valor" in k),"")
-  if not desc: desc=" | ".join(f"{k}: {v}" for k,v in d.items() if len(v)>3)[:1200]
-  a=row(source,url,desc[:240] or "Operacao",desc,org,val)
-  if a:result.append(a)
+  if not desc:desc=" | ".join(f"{k}: {v}" for k,v in d.items() if len(v)>3)[:1200]
+  a=row(source,url,desc[:240] or "Operacao",desc,org,val,kind=kind)
+  if not a:continue
+  date=""
+  for col in eligible:
+   if col in x.index:
+    date=parse_date(x[col])
+    if date:break
+  a["data_origem"]=date
+  a["coluna_data"]=col if date else ""
+  result.append(a)
  return result
+
 def bndes():
  url="https://dadosabertos.bndes.gov.br/api/3/action/package_show?id=operacoes-financiamento"
  resources=get(url).json()["result"]["resources"]
@@ -76,7 +116,7 @@ def finep():
     if norm(sheet).startswith(("guia","legenda","crd_-_condicoes")):continue
     df=pd.read_excel(workbook,sheet_name=sheet,dtype=str)
     inspected+=len(df)
-    parsed=extract(df,"Finep",url+"#sheet="+sheet)
+    parsed=extract(df,"Finep",url+"#sheet="+sheet,kind=kind)
     for item in parsed:item["tipo_evidencia"]=kind
     matched+=len(parsed);results.extend(parsed)
    print(json.dumps({"fonte":"Finep","arquivo":filename,"abas":workbook.sheet_names,"linhas_lidas":inspected,"linhas_agro":matched},ensure_ascii=False))
@@ -123,14 +163,14 @@ def normalize_records(raw):
  excluded_old=0; missing_dates=0
  for item in raw:
   if item["tipo_evidencia"]=="operacao_nao_aprovada":continue
-  date=find_date(item["descricao"])
+  date=item.get("data_origem") or find_date(item["descricao"])
   if not date: missing_dates+=1
   elif date<cutoff:
    excluded_old+=1;continue
   org=clean_org(item["organizacao"])
   # Same evidence type and textual record in separate exports is one signal.
   key=hashlib.sha256(("|".join([item["fonte"],item["tipo_evidencia"],org,norm(item["descricao"])[:400]])).encode()).hexdigest()[:16]
-  item.update(data_evidencia=date,periodo="ultimos_36_meses" if date else "data_nao_verificada",id_evidencia=key,problema_economico="; ".join(problem(item["descricao"])),evidencia_comercial="investimento_financiado" if item["tipo_evidencia"] in ("operacao_contratada","financiamento") else "desembolso_reportado",confianca_data="extraida_do_texto")
+  item.update(data_evidencia=date,periodo="ultimos_36_meses" if date else "data_nao_verificada",id_evidencia=key,problema_economico="; ".join(problem(item["descricao"])),evidencia_comercial="investimento_financiado" if item["tipo_evidencia"] in ("operacao_contratada","financiamento") else "desembolso_reportado",confianca_data="coluna_estruturada" if item.get("data_origem") else ("extraida_do_texto" if date else "nao_verificada"))
   collected[key]=item
  return list(collected.values()),dict(excluidos_antigos=excluded_old,sem_data_verificavel=missing_dates,janela_meses=LOOKBACK_MONTHS)
 
@@ -141,7 +181,7 @@ def main():
    data=fn();raw+=data;status.append(dict(fonte=name,estado="ok" if data else "sem_registros",registros=len(data)))
   except Exception as e:status.append(dict(fonte=name,estado="erro",registros=0,motivo=str(e)[:500]))
  allrows,quality=normalize_records(raw)
- cols=["id_evidencia","fonte","tipo_evidencia","organizacao","titulo","descricao","valor_reportado","temas","data_evidencia","periodo","problema_economico","evidencia_comercial","confianca_data","url_fonte","demanda_comercial_comprovada"]
+ cols=["id_evidencia","fonte","tipo_evidencia","organizacao","titulo","descricao","valor_reportado","temas","data_evidencia","periodo","problema_economico","evidencia_comercial","confianca_data","url_fonte","demanda_comercial_comprovada","data_origem","coluna_data"]
  with (OUT/"evidencias.csv").open("w",newline="",encoding="utf-8-sig") as f:
   w=csv.DictWriter(f,cols);w.writeheader();w.writerows(allrows)
  groups={}
