@@ -159,7 +159,7 @@ def main():
   w=csv.DictWriter(f,["tema","n_registros","fontes","n_organizacoes","contratacoes","desembolsos"]);w.writeheader();w.writerows(summary)
  (OUT/"evidencias.json").write_text(json.dumps(allrows,ensure_ascii=False),encoding="utf-8")
  (OUT/"temas.json").write_text(json.dumps(summary,ensure_ascii=False),encoding="utf-8")
- state=dict(gerado_em_utc=datetime.now(timezone.utc).isoformat(),total_registros=len(allrows),registros_recentes=sum(x["periodo"]=="ultimos_36_meses" for x in allrows),registros_brutos=len(raw),fontes=status,qualidade=quality,nota="Somente registros com data identificada nos campos textuais; investimento nao prova demanda. Sem ranking comercial ate verificacao de contratos.")
+ state=dict(gerado_em_utc=datetime.now(timezone.utc).isoformat(),total_registros=len(allrows),registros_recentes=sum(x["periodo"]=="ultimos_36_meses" for x in allrows),registros_brutos=len(raw),fontes=status,qualidade=quality,nota="Registros sem data ficam separados e nao entram nos temas recentes. Investimento nao comprova demanda comercial.")
  (OUT/"status.json").write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding="utf-8")
  print(json.dumps(state,ensure_ascii=False,indent=2))
  if not allrows:raise SystemExit("Sem evidencias coletadas; revisar fontes")
