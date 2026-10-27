@@ -37,6 +37,7 @@ def extract(df,source,url):
   desc=" | ".join(f"{k}: {v}" for k,v in d.items() if any(t in k for t in ("projeto","setor","atividade","produto","finalidade","objetivo","tema","descricao")))
   org=next((v for k,v in d.items() if any(t in k for t in ("cliente","empresa","beneficiario","proponente"))),"")
   val=next((v for k,v in d.items() if "valor" in k),"")
+  if not desc: desc=" | ".join(f"{k}: {v}" for k,v in d.items() if len(v)>3)[:1200]
   a=row(source,url,desc[:240] or "Operacao",desc,org,val)
   if a:result.append(a)
  return result
@@ -52,18 +53,26 @@ def bndes():
  if not results and errs:raise RuntimeError("; ".join(errs)[:350])
  return results
 def finep():
- url="https://www.finep.gov.br/transparencia-finep/paineis-e-downloads/central-de-downloads"
- soup=BeautifulSoup(get(url).text,"html.parser")
- links=[]
- for a in soup.select("a[href]"):
-  href=urljoin(url,a["href"])
-  if re.search(r"\.(xlsx|xls|csv)(\?|$)",href,re.I):links.append(href)
- if not links:raise ValueError("Nenhuma planilha detectada; estrutura do site pode ter mudado")
+ # Official XLSX downloads linked from the Finep legacy downloads portal.
+ # Direct URLs are stable file names; weekly refreshes overwrite file contents.
+ base="https://download.finep.gov.br/"
+ datasets=[
+  ("Contratacao.xlsx","operacao_contratada"),
+  ("Liberacao.xlsx","desembolso"),
+  ("Nao_Aprovados.xlsx","operacao_nao_aprovada"),
+ ]
  results=[];errors=[]
- for link in list(dict.fromkeys(links))[:4]:
-  try:results+=extract(readtab(link),"Finep",link)
-  except Exception as e:errors.append(str(e))
- if not results and errors:raise RuntimeError("; ".join(errors)[:350])
+ for filename,kind in datasets:
+  url=base+filename
+  try:
+   df=readtab(url)
+   # Some public exports use nonstandard column names; retain the row text
+   # for searching when none of the expected descriptive headers exist.
+   parsed=extract(df,"Finep",url)
+   for item in parsed:item["tipo_evidencia"]=kind
+   results.extend(parsed)
+  except Exception as exc:errors.append(f"{filename}: {str(exc)[:180]}")
+ if errors:raise RuntimeError("Falha parcial na Finep: "+"; ".join(errors))
  return results
 def embrapii():
  url="https://embrapii.org.br/projetos/"
