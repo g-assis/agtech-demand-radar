@@ -21,6 +21,8 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Testar regras de classificacao
+        run: python -m unittest discover -s tests -v
       - name: Coletar dados publicos
         id: collect
         continue-on-error: true
