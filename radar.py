@@ -65,12 +65,19 @@ def finep():
  for filename,kind in datasets:
   url=base+filename
   try:
-   df=readtab(url)
-   # Some public exports use nonstandard column names; retain the row text
-   # for searching when none of the expected descriptive headers exist.
-   parsed=extract(df,"Finep",url)
-   for item in parsed:item["tipo_evidencia"]=kind
-   results.extend(parsed)
+   raw=get(url).content
+   if not raw.startswith(b"PK"):raise ValueError("Resposta nao e XLSX valido")
+   workbook=pd.ExcelFile(io.BytesIO(raw))
+   inspected=0;matched=0
+   for sheet in workbook.sheet_names:
+    df=pd.read_excel(workbook,sheet_name=sheet,dtype=str)
+    inspected+=len(df)
+    parsed=extract(df,"Finep",url+"#sheet="+sheet)
+    for item in parsed:item["tipo_evidencia"]=kind
+    matched+=len(parsed);results.extend(parsed)
+   print(json.dumps({"fonte":"Finep","arquivo":filename,"abas":workbook.sheet_names,"linhas_lidas":inspected,"linhas_agro":matched},ensure_ascii=False))
+   if inspected==0:errors.append(f"{filename}: planilha vazia")
+   elif matched==0:errors.append(f"{filename}: nenhuma linha classificada como agro em {inspected} linhas")
   except Exception as exc:errors.append(f"{filename}: {str(exc)[:180]}")
  if errors:raise RuntimeError("Falha parcial na Finep: "+"; ".join(errors))
  return results
