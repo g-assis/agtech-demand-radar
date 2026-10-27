@@ -25,10 +25,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Coletar dados publicos
         id: collect
-        continue-on-error: true
         run: python radar.py
       - name: Preparar painel
-        if: always()
         run: |
           mkdir -p site/data
           cp output/* site/data/ 2>/dev/null || true
